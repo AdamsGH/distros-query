@@ -44,6 +44,13 @@ impl FromStr for TableLayout {
 }
 
 pub fn print_results(results: &[PackageInfo], format: OutputFormat, layout: TableLayout, color: bool) {
+    if results.is_empty() {
+        match format {
+            OutputFormat::Json  => println!("[]"),
+            OutputFormat::Table => eprintln!("no results"),
+        }
+        return;
+    }
     match format {
         OutputFormat::Table => match layout {
             TableLayout::Flat        => print_flat(results, color),

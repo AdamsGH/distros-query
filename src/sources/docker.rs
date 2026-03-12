@@ -107,14 +107,27 @@ impl PackageSource for DockerSource {
 }
 
 fn parse(pkg: &str, repo: &str, parser: Parser, output: &str) -> Vec<PackageInfo> {
-    match parser {
+    let all = match parser {
         Parser::OneName  => parse_one_name(pkg, repo, output),
         Parser::AptCache => parse_apt_cache(pkg, repo, output),
         Parser::Pacman   => parse_pacman(pkg, repo, output),
         Parser::Dnf      => parse_dnf(pkg, repo, output),
         Parser::Zypper   => parse_zypper(pkg, repo, output),
         Parser::Xbps     => parse_xbps(pkg, repo, output),
-    }
+    };
+    filter_results(pkg, all)
+}
+
+/// Package managers search by substring — prefer exact match, fall back to all results.
+/// This keeps behaviour consistent with native API sources (arch, alpine, etc.)
+/// which return only the exact package.
+fn filter_results(pkg: &str, mut results: Vec<PackageInfo>) -> Vec<PackageInfo> {
+    let exact: Vec<PackageInfo> = results
+        .iter()
+        .filter(|r| r.name == pkg)
+        .cloned()
+        .collect();
+    if exact.is_empty() { results } else { exact }
 }
 
 fn make(pkg: &str, repo: &str, name: String, version: String) -> PackageInfo {

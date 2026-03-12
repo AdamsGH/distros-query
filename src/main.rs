@@ -329,18 +329,28 @@ async fn fetch_packages_parallel(
             set.spawn(async move {
                 let _permit = sem.acquire().await;
 
-                // Route to the best available source for this repo.
-                let source = source_for(&sources, &repo);
+                // Try each source in priority order. If a non-repology source
+                // returns zero results, fall through to the next candidate so
+                // that a broken/empty Docker image doesn't silently hide results.
+                let candidates: Vec<&dyn PackageSource> = sources
+                    .iter()
+                    .filter(|s| s.supports(&repo))
+                    .map(|s| s.as_ref())
+                    .collect();
 
-                match source {
-                    Some(src) if src.name() != "repology" => {
-                        src.search(&pkg, &repo, &client).await
+                for src in &candidates {
+                    if src.name() == "repology" {
+                        break;
                     }
-                    _ => {
-                        // Repology — pass through extra filters.
-                        repology::fetch_package(&client, &pkg, &repo, all, sort_package, &filters).await
+                    let results = src.search(&pkg, &repo, &client).await?;
+                    if !results.is_empty() {
+                        return Ok(results);
                     }
+                    // Empty result — try next source in priority list.
                 }
+
+                // Repology as final fallback.
+                repology::fetch_package(&client, &pkg, &repo, all, sort_package, &filters).await
             });
         }
     }
