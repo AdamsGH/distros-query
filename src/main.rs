@@ -20,9 +20,11 @@ const VERSION: &str = "0.1.0";
 #[derive(Parser, Debug)]
 #[command(
     name = "distq",
-    about = "Query package information from Repology.org and native distro APIs",
+    about = "Query package information across Linux distributions",
     long_about = "Query package information across Linux distributions.\n\n\
-        Source priority (per-repo, first match wins): arch → aur → fedora → repology\n\
+        Source priority (per-repo, first match wins):\n  \
+        docker → arch → aur → fedora → alpine → debian → ubuntu → nixos → repology\n\
+        docker source activates automatically when a distq/<distro> image exists locally.\n\
         Override in ~/.config/distq/config.toml under [sources] priority = [...]\n\n\
         Repo selection priority (highest to lowest):\n  \
         --repos  >  DISTQ_REPOS env  >  --profile  >  config default_repos  >  autodetect",
@@ -137,16 +139,17 @@ struct Args {
     #[arg(long)]
     source: Option<String>,
 
-    /// Maximum parallel HTTP requests
+    /// Maximum parallel requests (HTTP and docker subprocess)
     #[arg(long, default_value_t = DEFAULT_JOBS)]
     jobs: usize,
 
     /// Build distq/<distro> Docker images from local Dockerfile.<distro> files and exit.
-    /// Equivalent to: distq docker build
+    /// Equivalent to: distq docker build [--missing]
+    /// Use --build-docker-images --missing to skip already-present images.
     #[arg(long)]
     build_docker_images: bool,
 
-    /// Skip images that already exist locally (use with --build-docker-images)
+    /// Used with --build-docker-images: skip images that already exist locally
     #[arg(long, requires = "build_docker_images")]
     missing: bool,
 
@@ -180,6 +183,8 @@ enum DockerCmd {
         #[arg(long)]
         missing: bool,
     },
+    /// List locally available distq/<distro> images
+    List,
 }
 
 #[tokio::main]
@@ -204,6 +209,9 @@ async fn main() -> Result<()> {
     }
     if let Some(Cmd::Docker { action: DockerCmd::Build { missing } }) = args.subcommand {
         return docker_build::run(&cfg, missing);
+    }
+    if let Some(Cmd::Docker { action: DockerCmd::List }) = args.subcommand {
+        return docker_build::list();
     }
     let color = supports_color();
     let jobs = args.jobs.max(1);

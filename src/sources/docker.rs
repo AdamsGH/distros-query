@@ -1,5 +1,8 @@
 use anyhow::{bail, Result};
+use std::collections::HashSet;
 use std::process::Command;
+use std::sync::OnceLock;
+use tokio::task::spawn_blocking;
 
 use crate::sources::{PackageInfo, PackageSource, PackageStatus};
 
@@ -45,15 +48,22 @@ fn mapping_for(repo: &str) -> Option<&'static Mapping> {
     MAPPINGS.iter().find(|m| repo == m.repo_prefix || repo.starts_with(m.repo_prefix))
 }
 
-/// Check that image `distq/<tag>` exists locally without pulling.
-fn image_exists(tag: &str) -> bool {
-    Command::new("docker")
-        .args(["image", "inspect", "--format", ".", &format!("distq/{tag}")])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+/// Return the set of distq/* image suffixes present locally, queried once and cached.
+fn available_images() -> &'static HashSet<String> {
+    static CACHE: OnceLock<HashSet<String>> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        let out = Command::new("docker")
+            .args(["images", "--filter", "reference=distq/*", "--format", "{{.Repository}}"])
+            .output();
+        match out {
+            Err(_) => HashSet::new(),
+            Ok(o) => String::from_utf8_lossy(&o.stdout)
+                .lines()
+                // "distq/arch" → "arch"
+                .filter_map(|l| l.trim().strip_prefix("distq/").map(str::to_string))
+                .collect(),
+        }
+    })
 }
 
 #[async_trait::async_trait]
@@ -62,7 +72,7 @@ impl PackageSource for DockerSource {
 
     fn supports(&self, repo: &str) -> bool {
         mapping_for(repo)
-            .map(|m| image_exists(m.image))
+            .map(|m| available_images().contains(m.image))
             .unwrap_or(false)
     }
 
@@ -78,14 +88,21 @@ impl PackageSource for DockerSource {
         };
 
         let image = format!("distq/{}", mapping.image);
+        let pkg = pkg.to_string();
+        let repo = repo.to_string();
+        let parser = mapping.parser;
 
-        let output = Command::new("docker")
-            .args(["run", "--rm", "--network=none", &image, pkg])
-            .output()?;
+        // docker run is a blocking subprocess — run it off the async executor.
+        let output = spawn_blocking(move || {
+            Command::new("docker")
+                .args(["run", "--rm", "--network=none", &image, &pkg])
+                .output()
+                .map(|o| (String::from_utf8_lossy(&o.stdout).into_owned(), pkg, repo))
+        })
+        .await??;
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let results = parse(pkg, repo, mapping.parser, &stdout);
-        Ok(results)
+        let (stdout, pkg, repo) = output;
+        Ok(parse(&pkg, &repo, parser, &stdout))
     }
 }
 

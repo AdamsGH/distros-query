@@ -103,16 +103,14 @@ fn build_image(dockerfile: &Path, tag: &str, context_dir: &Path) -> Result<()> {
         return Ok(());
     }
 
-    // Print docker's stderr so the user can diagnose the failure.
+    // Show only the tail of docker's stderr — full output can be thousands of lines.
     let stderr = String::from_utf8_lossy(&output.stderr);
-    bail!(
-        "docker build exited with {}\n{}",
-        output.status,
-        stderr.trim()
-    );
+    let tail: Vec<&str> = stderr.trim().lines().rev().take(10).collect();
+    let tail_str = tail.into_iter().rev().collect::<Vec<_>>().join("\n");
+    bail!("docker build exited with {}\n{}", output.status, tail_str);
 }
 
-/// Return true if `docker image inspect <tag>` succeeds (image exists locally).
+/// Return true if the image exists locally.
 fn image_exists(tag: &str) -> bool {
     Command::new("docker")
         .args(["image", "inspect", "--format", ".", tag])
@@ -121,4 +119,39 @@ fn image_exists(tag: &str) -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+
+/// `distq docker list` — show locally available distq/* images with size.
+pub fn list() -> Result<()> {
+    let output = Command::new("docker")
+        .args([
+            "images",
+            "--filter", "reference=distq/*",
+            "--format", "{{.Repository}}:{{.Tag}}\t{{.Size}}",
+        ])
+        .output()?;
+
+    if !output.status.success() {
+        bail!("docker images failed");
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+
+    if lines.is_empty() {
+        println!("No distq/* images found locally.");
+        println!("Run: distq docker build");
+        return Ok(());
+    }
+
+    println!("{:<30} {}", "IMAGE", "SIZE");
+    println!("{}", "─".repeat(40));
+    for line in &lines {
+        let mut parts = line.splitn(2, '\t');
+        let image = parts.next().unwrap_or("");
+        let size  = parts.next().unwrap_or("");
+        println!("{:<30} {}", image, size);
+    }
+    Ok(())
 }

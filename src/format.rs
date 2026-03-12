@@ -262,6 +262,7 @@ fn print_json(results: &[PackageInfo]) {
                 "status":      r.status.label(),
                 "latest":      r.latest,
                 "maintainers": r.maintainers,
+                "source":      r.source,
             })
         })
         .collect();
