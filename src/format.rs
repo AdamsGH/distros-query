@@ -1,4 +1,4 @@
-use crate::query::{PackageInfo, PackageStatus};
+use crate::sources::{PackageInfo, PackageStatus};
 use comfy_table::{
     Attribute, Cell, Color, ContentArrangement, Table,
     presets::UTF8_BORDERS_ONLY,

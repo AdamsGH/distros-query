@@ -52,6 +52,17 @@ pub struct Config {
     /// If absent, falls back to autodetect.
     #[serde(default)]
     pub default_repos: Vec<String>,
+
+    /// Ordered list of source backends to try.
+    /// Each repo is routed to the first source in this list that supports it.
+    /// Available: "arch", "aur", "fedora", "repology"
+    /// repology is always appended as last-resort fallback even if omitted.
+    ///
+    /// Example:
+    ///   [sources]
+    ///   priority = ["arch", "aur", "fedora", "repology"]
+    #[serde(default)]
+    pub source_priority: Vec<String>,
 }
 
 impl Config {

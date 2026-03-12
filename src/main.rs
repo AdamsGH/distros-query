@@ -1,15 +1,17 @@
 mod autodetect;
 mod config;
 mod format;
-mod query;
+mod sources;
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use config::{Config, parse_repos};
 use format::{OutputFormat, TableLayout, print_results};
-use query::{PackageInfo, fetch_package, fetch_packages_list};
+use sources::{PackageInfo, PackageSource, ordered_sources, source_for};
+use sources::repology;
 use std::io::{self, IsTerminal};
 use std::sync::Arc;
+use tokio::task::JoinSet;
 
 const DEFAULT_JOBS: usize = 2;
 const VERSION: &str = "0.1.0";
@@ -17,12 +19,12 @@ const VERSION: &str = "0.1.0";
 #[derive(Parser, Debug)]
 #[command(
     name = "distq",
-    about = "Query package information from Repology.org",
-    long_about = "Query package information from Repology.org.\n\n\
+    about = "Query package information from Repology.org and native distro APIs",
+    long_about = "Query package information across Linux distributions.\n\n\
+        Source priority (per-repo, first match wins): arch → aur → fedora → repology\n\
+        Override in ~/.config/distq/config.toml under [sources] priority = [...]\n\n\
         Repo selection priority (highest to lowest):\n  \
-        --repos  >  DISTQ_REPOS env  >  --profile  >  config default_repos  >  autodetect\n\n\
-        The built-in 'linux' profile can be overridden via DISTQ_REPOS.\n\
-        Config file: ~/.config/distq/config.toml",
+        --repos  >  DISTQ_REPOS env  >  --profile  >  config default_repos  >  autodetect",
     version = VERSION,
     disable_version_flag = true,
 )]
@@ -47,7 +49,7 @@ struct Args {
 
     // ── Display ────────────────────────────────────────────────────────────
 
-    /// Show packages from all repositories (overrides repo filtering)
+    /// Show packages from all repositories (repology only)
     #[arg(long, conflicts_with_all = ["repo", "REPO_LIST", "profile"])]
     all: bool,
 
@@ -60,7 +62,7 @@ struct Args {
     #[arg(long, default_value = "table")]
     format: OutputFormat,
 
-    // ── Repology API filters ───────────────────────────────────────────────
+    // ── Repology API filters (used when repology backend is active) ────────
 
     /// Filter: packages present in this repo
     #[arg(long)]
@@ -110,7 +112,7 @@ struct Args {
     #[arg(long)]
     problematic: bool,
 
-    // ── Listing / pagination ───────────────────────────────────────────────
+    // ── Listing / pagination (repology listing mode) ───────────────────────
 
     /// Start listing from this project name
     #[arg(long)]
@@ -124,7 +126,7 @@ struct Args {
     #[arg(long, default_value = "1")]
     page: u32,
 
-    /// Sort by binary package name instead of source name
+    /// Sort by binary package name instead of source name (repology only)
     #[arg(long)]
     sort_package: bool,
 
@@ -158,23 +160,16 @@ async fn main() -> Result<()> {
         .context("failed to build HTTP client")?;
 
     // ── Resolve target repos ───────────────────────────────────────────────
-    //
-    // Priority: --repos  >  DISTQ_REPOS  >  --profile  >  config default_repos  >  autodetect
-    //
-    // Special case: DISTQ_REPOS overrides the built-in "linux" profile content,
-    // so `--profile linux` with DISTQ_REPOS set uses the env value.
 
     let repos: Vec<String> = if args.all {
-        vec![] // --all means: no repo filtering, handled separately
+        vec![]
     } else if let Some(ref list) = args.multi_repos {
         parse_repos(list)
     } else if let Some(ref env_val) = std::env::var("DISTQ_REPOS").ok().filter(|s| !s.is_empty()) {
-        // DISTQ_REPOS overrides everything except explicit --repos
         parse_repos(env_val)
     } else if let Some(ref profile_name) = args.profile {
-        // --profile with DISTQ_REPOS already handled above (env wins over profile)
         match cfg.resolve_profile(profile_name) {
-            Some(r) => r.into_iter().map(|r| normalize_repo(r)).collect(),
+            Some(r) => r.into_iter().map(normalize_repo).collect(),
             None => bail!(
                 "distq: unknown profile '{profile_name}'\n\
                  Built-in profiles: linux, bsd, all\n\
@@ -198,159 +193,143 @@ async fn main() -> Result<()> {
     };
 
     let is_multi = repos.len() > 1;
-
-    // Default layout: transposed for multi-repo queries, flat for single
     let layout = args.layout.unwrap_or(if is_multi {
         TableLayout::Transposed
     } else {
         TableLayout::Flat
     });
 
+    // ── Build source registry ──────────────────────────────────────────────
+
+    let sources = Arc::new(ordered_sources(&cfg));
+
     // ── Execute queries ────────────────────────────────────────────────────
 
     let results: Vec<PackageInfo> = if args.packages.is_empty() {
-        // Listing mode — only meaningful for single repo
+        // Listing mode — always via Repology (it's the only source with browse API)
         let repo = repos.into_iter().next().unwrap_or_default();
+        let query = build_repology_filters(&args, &repo);
         if args.end.is_some() {
-            fetch_packages_list(
-                &client,
-                &repo,
-                args.begin.as_deref(),
-                args.end.as_deref(),
-                build_query_params(&args, &repo),
-            )
-            .await
-            .context("failed to fetch package list")?
+            repology::fetch_packages_list(&client, &repo, args.begin.as_deref(), args.end.as_deref(), query).await?
         } else {
-            query::fetch_pages(
-                &client,
-                &repo,
-                args.begin.as_deref(),
-                args.page,
-                build_query_params(&args, &repo),
-            )
-            .await
-            .context("failed to fetch pages")?
+            repology::fetch_pages(&client, &repo, args.begin.as_deref(), args.page, query).await?
         }
     } else if args.all {
-        fetch_multi_packages_owned(&client, &args.packages, vec!["".to_string()], true, args.sort_package, build_query_params(&args, ""), jobs).await?
+        // --all goes straight to repology
+        let query = build_repology_filters(&args, "");
+        fetch_packages_parallel(&client, &args.packages, &[""], true, args.sort_package, query, jobs, &sources).await?
     } else {
-        fetch_multi_packages_owned(&client, &args.packages, repos, false, args.sort_package, build_api_filters(&args), jobs).await?
+        let query = build_repology_filters(&args, "");
+        fetch_packages_parallel(&client, &args.packages, &repos.iter().map(|s| s.as_str()).collect::<Vec<_>>(), false, args.sort_package, query, jobs, &sources).await?
     };
 
     print_results(&results, args.format, layout, color);
-
     Ok(())
 }
 
-async fn fetch_multi_packages_owned(
+// ── Parallel fetch ────────────────────────────────────────────────────────────
+
+async fn fetch_packages_parallel(
     client: &reqwest::Client,
     packages: &[String],
-    repos: Vec<String>,
+    repos: &[&str],
     all: bool,
     sort_package: bool,
-    query: Vec<(String, String)>,
+    repology_filters: Vec<(String, String)>,
     jobs: usize,
+    sources: &Arc<Vec<Box<dyn PackageSource>>>,
 ) -> Result<Vec<PackageInfo>> {
-    use tokio::task::JoinSet;
-
     let client = Arc::new(client.clone());
-    let query = Arc::new(query);
+    let filters = Arc::new(repology_filters);
     let semaphore = Arc::new(tokio::sync::Semaphore::new(jobs));
-
     let mut set: JoinSet<Result<Vec<PackageInfo>>> = JoinSet::new();
 
     for pkg in packages {
-        for repo in &repos {
+        for &repo in repos {
             let client = Arc::clone(&client);
-            let query = Arc::clone(&query);
+            let sources = Arc::clone(sources);
+            let filters = Arc::clone(&filters);
             let pkg = pkg.clone();
-            let repo = repo.clone();
+            let repo = repo.to_string();
             let sem = Arc::clone(&semaphore);
 
             set.spawn(async move {
                 let _permit = sem.acquire().await;
-                fetch_package(&client, &pkg, &repo, all, sort_package, &query).await
+
+                // Route to the best available source for this repo.
+                let source = source_for(&sources, &repo);
+
+                match source {
+                    Some(src) if src.name() != "repology" => {
+                        src.search(&pkg, &repo, &client).await
+                    }
+                    _ => {
+                        // Repology — pass through extra filters.
+                        repology::fetch_package(&client, &pkg, &repo, all, sort_package, &filters).await
+                    }
+                }
             });
         }
     }
 
     let mut all_results = Vec::new();
     while let Some(res) = set.join_next().await {
-        let items = res.context("task panicked")?.context("request failed")?;
-        all_results.extend(items);
+        all_results.extend(res.context("task panicked")?.context("request failed")?);
     }
-
     all_results.sort_by(|a, b| a.name.cmp(&b.name).then(a.repo.cmp(&b.repo)));
     Ok(all_results)
 }
 
-fn build_query_params(args: &Args, repo: &str) -> Vec<(String, String)> {
-    let mut p = build_api_filters(args);
+// ── Query helpers ─────────────────────────────────────────────────────────────
 
-    // In single-repo mode, filter the API response to that repo
-    if !args.all && !repo.is_empty() {
-        let inrepo = args.inrepo.as_deref().unwrap_or(repo);
-        p.push(("inrepo".into(), inrepo.into()));
-    }
-
-    p
-}
-
-/// API filters that don't depend on repo (used for multi-repo queries where
-/// each request handles its own inrepo filter).
-fn build_api_filters(args: &Args) -> Vec<(String, String)> {
+/// Build Repology API filter params from CLI args.
+/// inrepo is intentionally omitted here — each request adds it per-repo in repology.rs.
+fn build_repology_filters(args: &Args, _repo: &str) -> Vec<(String, String)> {
     let mut p: Vec<(String, String)> = Vec::new();
 
     macro_rules! opt_str {
         ($field:expr, $key:expr) => {
-            if let Some(v) = &$field {
-                p.push(($key.into(), v.clone()));
-            }
+            if let Some(v) = &$field { p.push(($key.into(), v.clone())); }
         };
     }
     macro_rules! opt_bool {
         ($field:expr, $key:expr) => {
-            if $field {
-                p.push(($key.into(), "1".into()));
-            }
+            if $field { p.push(($key.into(), "1".into())); }
         };
     }
 
-    if let Some(v) = &args.inrepo {
-        p.push(("inrepo".into(), v.clone()));
-    }
-    opt_str!(args.notinrepo, "notinrepo");
-    opt_str!(args.search, "search");
-    opt_str!(args.maintainer, "maintainer");
-    opt_str!(args.category, "category");
-    opt_str!(args.min_repos, "repos");
-    opt_str!(args.min_families, "families");
-    opt_str!(args.min_repos_newest, "repos_newest");
+    opt_str!(args.inrepo,            "inrepo");
+    opt_str!(args.notinrepo,         "notinrepo");
+    opt_str!(args.search,            "search");
+    opt_str!(args.maintainer,        "maintainer");
+    opt_str!(args.category,          "category");
+    opt_str!(args.min_repos,         "repos");
+    opt_str!(args.min_families,      "families");
+    opt_str!(args.min_repos_newest,  "repos_newest");
     opt_str!(args.min_families_newest, "families_newest");
-    opt_bool!(args.newest, "newest");
-    opt_bool!(args.outdated, "outdated");
-    opt_bool!(args.problematic, "problematic");
+    opt_bool!(args.newest,           "newest");
+    opt_bool!(args.outdated,         "outdated");
+    opt_bool!(args.problematic,      "problematic");
 
     p
 }
 
+// ── Misc ──────────────────────────────────────────────────────────────────────
+
 pub fn normalize_repo(repo: String) -> String {
     match repo.as_str() {
-        "alpine" => "alpine_edge".into(),
-        "debian" => "debian_unstable".into(),
-        "fedora" => "fedora_rawhide".into(),
-        "pkgsrc" => "pkgsrc_current".into(),
-        "opensuse" | "suse" => "opensuse_tumbleweed".into(),
-        "nix" | "nixos" => "nix_unstable".into(),
-        "void" => "void_x86_64".into(),
-        _ => repo,
+        "alpine"             => "alpine_edge".into(),
+        "debian"             => "debian_unstable".into(),
+        "fedora"             => "fedora_rawhide".into(),
+        "pkgsrc"             => "pkgsrc_current".into(),
+        "opensuse" | "suse"  => "opensuse_tumbleweed".into(),
+        "nix" | "nixos"      => "nix_unstable".into(),
+        "void"               => "void_x86_64".into(),
+        _                    => repo,
     }
 }
 
 fn supports_color() -> bool {
-    if std::env::var_os("NO_COLOR").is_some() {
-        return false;
-    }
+    if std::env::var_os("NO_COLOR").is_some() { return false; }
     io::stdout().is_terminal()
 }
