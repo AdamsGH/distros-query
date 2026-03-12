@@ -132,9 +132,17 @@ struct Args {
 
     // ── Misc ───────────────────────────────────────────────────────────────
 
+    /// Force a specific source backend: arch, aur, fedora, alpine, debian, ubuntu, nixos, repology
+    #[arg(long)]
+    source: Option<String>,
+
     /// Maximum parallel HTTP requests
     #[arg(long, default_value_t = DEFAULT_JOBS)]
     jobs: usize,
+
+    /// Write a default config file to ~/.config/distq/config.toml and exit
+    #[arg(long)]
+    init_config: bool,
 
     /// Print version and exit
     #[arg(long = "version", short = 'V')]
@@ -148,6 +156,10 @@ async fn main() -> Result<()> {
     if args.print_version {
         println!("distq {VERSION}");
         return Ok(());
+    }
+
+    if args.init_config {
+        return config::write_default_config();
     }
 
     let cfg = Config::load().context("failed to load config")?;
@@ -201,7 +213,18 @@ async fn main() -> Result<()> {
 
     // ── Build source registry ──────────────────────────────────────────────
 
-    let sources = Arc::new(ordered_sources(&cfg));
+    // --source forces a single backend, bypassing priority routing.
+    let sources = Arc::new(if let Some(ref name) = args.source {
+        match sources::single_source(name) {
+            Some(s) => s,
+            None => bail!(
+                "distq: unknown source '{name}'\n\
+                 Available: arch, aur, fedora, alpine, debian, ubuntu, nixos, repology"
+            ),
+        }
+    } else {
+        ordered_sources(&cfg)
+    });
 
     // ── Execute queries ────────────────────────────────────────────────────
 

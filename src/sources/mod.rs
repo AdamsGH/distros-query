@@ -3,6 +3,7 @@ pub mod arch;
 pub mod aur;
 pub mod debian;
 pub mod fedora;
+pub mod nixos;
 pub mod repology;
 
 use anyhow::Result;
@@ -23,8 +24,7 @@ pub struct PackageInfo {
     /// Latest known version across all repos (may be "-" if unknown).
     pub latest: String,
     pub maintainers: Vec<String>,
-    /// Which source backend produced this result.
-    #[allow(dead_code)]
+    /// Which source backend produced this result (e.g. "arch", "repology").
     pub source: &'static str,
 }
 
@@ -101,7 +101,7 @@ pub trait PackageSource: Send + Sync {
 
 /// Default source priority when not overridden in config.
 /// First source that `supports(repo)` and returns results wins.
-pub const DEFAULT_PRIORITY: &[&str] = &["arch", "aur", "fedora", "alpine", "debian", "ubuntu", "repology"];
+pub const DEFAULT_PRIORITY: &[&str] = &["arch", "aur", "fedora", "alpine", "debian", "ubuntu", "nixos", "repology"];
 
 /// Build the ordered list of sources to try, respecting config priority.
 pub fn ordered_sources(cfg: &Config) -> Vec<Box<dyn PackageSource>> {
@@ -120,6 +120,7 @@ pub fn ordered_sources(cfg: &Config) -> Vec<Box<dyn PackageSource>> {
             "alpine"   => result.push(Box::new(alpine::AlpineSource)),
             "debian"   => result.push(Box::new(debian::DebianSource)),
             "ubuntu"   => result.push(Box::new(debian::UbuntuSource)),
+            "nixos"    => result.push(Box::new(nixos::NixosSource)),
             "repology" => result.push(Box::new(repology::RepologySource::new())),
             other => eprintln!("distq: unknown source '{other}' in config, skipping"),
         }
@@ -139,4 +140,20 @@ pub fn source_for<'a>(
     repo: &str,
 ) -> Option<&'a dyn PackageSource> {
     sources.iter().find(|s| s.supports(repo)).map(|s| s.as_ref())
+}
+
+/// Build a registry containing only one named source (for --source flag).
+pub fn single_source(name: &str) -> Option<Vec<Box<dyn PackageSource>>> {
+    let src: Box<dyn PackageSource> = match name {
+        "arch"     => Box::new(arch::ArchSource),
+        "aur"      => Box::new(aur::AurSource),
+        "fedora"   => Box::new(fedora::FedoraSource),
+        "alpine"   => Box::new(alpine::AlpineSource),
+        "debian"   => Box::new(debian::DebianSource),
+        "ubuntu"   => Box::new(debian::UbuntuSource),
+        "nixos"    => Box::new(nixos::NixosSource),
+        "repology" => Box::new(repology::RepologySource::new()),
+        _          => return None,
+    };
+    Some(vec![src])
 }
