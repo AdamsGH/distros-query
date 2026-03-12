@@ -50,13 +50,13 @@ impl PackageSource for FedoraSource {
         let resp = client.get(&url).send().await
             .with_context(|| format!("GET {url}"))?;
 
-        if resp.status().as_u16() == 404 {
+        let status = resp.status();
+        if status.as_u16() == 404 || status.as_u16() == 400 {
             return Ok(vec![]);
         }
-        if !resp.status().is_success() {
-            let s = resp.status();
+        if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("mdapi error {s}: {body}");
+            anyhow::bail!("mdapi error {status}: {body}");
         }
 
         let p: MdapiPkg = resp.json().await.context("parsing mdapi response")?;

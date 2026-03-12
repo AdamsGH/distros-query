@@ -1,5 +1,7 @@
+pub mod alpine;
 pub mod arch;
 pub mod aur;
+pub mod debian;
 pub mod fedora;
 pub mod repology;
 
@@ -99,7 +101,7 @@ pub trait PackageSource: Send + Sync {
 
 /// Default source priority when not overridden in config.
 /// First source that `supports(repo)` and returns results wins.
-pub const DEFAULT_PRIORITY: &[&str] = &["arch", "aur", "fedora", "repology"];
+pub const DEFAULT_PRIORITY: &[&str] = &["arch", "aur", "fedora", "alpine", "debian", "ubuntu", "repology"];
 
 /// Build the ordered list of sources to try, respecting config priority.
 pub fn ordered_sources(cfg: &Config) -> Vec<Box<dyn PackageSource>> {
@@ -115,6 +117,9 @@ pub fn ordered_sources(cfg: &Config) -> Vec<Box<dyn PackageSource>> {
             "arch"     => result.push(Box::new(arch::ArchSource)),
             "aur"      => result.push(Box::new(aur::AurSource)),
             "fedora"   => result.push(Box::new(fedora::FedoraSource)),
+            "alpine"   => result.push(Box::new(alpine::AlpineSource)),
+            "debian"   => result.push(Box::new(debian::DebianSource)),
+            "ubuntu"   => result.push(Box::new(debian::UbuntuSource)),
             "repology" => result.push(Box::new(repology::RepologySource::new())),
             other => eprintln!("distq: unknown source '{other}' in config, skipping"),
         }
