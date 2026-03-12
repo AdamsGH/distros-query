@@ -2,6 +2,7 @@ pub mod alpine;
 pub mod arch;
 pub mod aur;
 pub mod debian;
+pub mod docker;
 pub mod fedora;
 pub mod nixos;
 pub mod repology;
@@ -101,7 +102,7 @@ pub trait PackageSource: Send + Sync {
 
 /// Default source priority when not overridden in config.
 /// First source that `supports(repo)` and returns results wins.
-pub const DEFAULT_PRIORITY: &[&str] = &["arch", "aur", "fedora", "alpine", "debian", "ubuntu", "nixos", "repology"];
+pub const DEFAULT_PRIORITY: &[&str] = &["docker", "arch", "aur", "fedora", "alpine", "debian", "ubuntu", "nixos", "repology"];
 
 /// Build the ordered list of sources to try, respecting config priority.
 pub fn ordered_sources(cfg: &Config) -> Vec<Box<dyn PackageSource>> {
@@ -114,6 +115,7 @@ pub fn ordered_sources(cfg: &Config) -> Vec<Box<dyn PackageSource>> {
     let mut result: Vec<Box<dyn PackageSource>> = Vec::new();
     for name in &priority {
         match *name {
+            "docker"   => result.push(Box::new(docker::DockerSource)),
             "arch"     => result.push(Box::new(arch::ArchSource)),
             "aur"      => result.push(Box::new(aur::AurSource)),
             "fedora"   => result.push(Box::new(fedora::FedoraSource)),
@@ -145,6 +147,7 @@ pub fn source_for<'a>(
 /// Build a registry containing only one named source (for --source flag).
 pub fn single_source(name: &str) -> Option<Vec<Box<dyn PackageSource>>> {
     let src: Box<dyn PackageSource> = match name {
+        "docker"   => Box::new(docker::DockerSource),
         "arch"     => Box::new(arch::ArchSource),
         "aur"      => Box::new(aur::AurSource),
         "fedora"   => Box::new(fedora::FedoraSource),

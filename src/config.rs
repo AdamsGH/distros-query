@@ -55,14 +55,21 @@ pub struct Config {
 
     /// Ordered list of source backends to try.
     /// Each repo is routed to the first source in this list that supports it.
-    /// Available: "arch", "aur", "fedora", "repology"
+    /// Available: "docker", "arch", "aur", "fedora", "alpine", "debian", "ubuntu", "nixos", "repology"
     /// repology is always appended as last-resort fallback even if omitted.
-    ///
-    /// Example:
-    ///   [sources]
-    ///   priority = ["arch", "aur", "fedora", "repology"]
     #[serde(default)]
     pub source_priority: Vec<String>,
+
+    /// Docker source settings.
+    #[serde(default)]
+    pub docker: DockerConfig,
+}
+
+#[derive(Debug, Deserialize, Serialize, Default)]
+pub struct DockerConfig {
+    /// Directory to search for Dockerfile.<distro> files when building images.
+    /// Defaults to: directory next to the distq binary, then ~/.config/distq/dockerfiles/
+    pub dockerfiles_dir: Option<PathBuf>,
 }
 
 impl Config {
@@ -124,10 +131,20 @@ pub fn write_default_config() -> anyhow::Result<()> {
 # First source whose supports(repo) returns true wins.
 # "repology" is always appended as last-resort fallback even if omitted here.
 #
-# Available sources: arch, aur, fedora, alpine, debian, ubuntu, nixos, repology
+# Available sources: docker, arch, aur, fedora, alpine, debian, ubuntu, nixos, repology
+# docker uses local distq/<distro> images (offline, no rate limits) — recommended first.
 #
 [sources]
-priority = ["arch", "aur", "fedora", "alpine", "debian", "ubuntu", "nixos", "repology"]
+priority = ["docker", "arch", "aur", "fedora", "alpine", "debian", "ubuntu", "nixos", "repology"]
+
+# ── Docker ────────────────────────────────────────────────────────────────────
+# Settings for the docker source and `distq docker build`.
+#
+# dockerfiles_dir: where to look for Dockerfile.<distro> files.
+# Default search order: next to the binary → ~/.config/distq/dockerfiles/
+#
+# [docker]
+# dockerfiles_dir = "/home/user/projects/distros-search/dockerfiles"
 
 # ── Profiles ──────────────────────────────────────────────────────────────────
 # Named repo groups. Use with: distq --profile <name> <package>
@@ -143,6 +160,50 @@ priority = ["arch", "aur", "fedora", "alpine", "debian", "ubuntu", "nixos", "rep
         .with_context(|| format!("writing {}", path.display()))?;
     println!("distq: config written to {}", path.display());
     Ok(())
+}
+
+/// Resolve the directory that contains `Dockerfile.*` files for `distq docker build`.
+///
+/// Search order:
+///   1. `config.docker.dockerfiles_dir` if set
+///   2. Directory containing the current executable
+///   3. `~/.config/distq/dockerfiles/`
+///
+/// Returns the first directory that exists and contains at least one `Dockerfile.*`.
+pub fn resolve_dockerfiles_dir(cfg: &Config) -> Option<PathBuf> {
+    let candidates: Vec<PathBuf> = {
+        let mut v = Vec::new();
+        if let Some(ref p) = cfg.docker.dockerfiles_dir {
+            v.push(p.clone());
+        }
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent() {
+                v.push(dir.to_path_buf());
+            }
+        }
+        v.push(
+            dirs_next::config_dir()
+                .unwrap_or_else(|| PathBuf::from("~/.config"))
+                .join("distq")
+                .join("dockerfiles"),
+        );
+        v
+    };
+
+    candidates.into_iter().find(|dir| {
+        dir.exists()
+            && std::fs::read_dir(dir)
+                .ok()
+                .map(|mut d| {
+                    d.any(|e| {
+                        e.ok()
+                            .and_then(|e| e.file_name().into_string().ok())
+                            .map(|n| n.starts_with("Dockerfile."))
+                            .unwrap_or(false)
+                    })
+                })
+                .unwrap_or(false)
+    })
 }
 
 /// Parse a comma-separated list of repo names, normalizing each one.

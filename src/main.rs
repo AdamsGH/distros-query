@@ -1,10 +1,11 @@
 mod autodetect;
 mod config;
+mod docker_build;
 mod format;
 mod sources;
 
 use anyhow::{Context, Result, bail};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use config::{Config, parse_repos};
 use format::{OutputFormat, TableLayout, print_results};
 use sources::{PackageInfo, PackageSource, ordered_sources, source_for};
@@ -132,13 +133,22 @@ struct Args {
 
     // ── Misc ───────────────────────────────────────────────────────────────
 
-    /// Force a specific source backend: arch, aur, fedora, alpine, debian, ubuntu, nixos, repology
+    /// Force a specific source backend: docker, arch, aur, fedora, alpine, debian, ubuntu, nixos, repology
     #[arg(long)]
     source: Option<String>,
 
     /// Maximum parallel HTTP requests
     #[arg(long, default_value_t = DEFAULT_JOBS)]
     jobs: usize,
+
+    /// Build distq/<distro> Docker images from local Dockerfile.<distro> files and exit.
+    /// Equivalent to: distq docker build
+    #[arg(long)]
+    build_docker_images: bool,
+
+    /// Skip images that already exist locally (use with --build-docker-images)
+    #[arg(long, requires = "build_docker_images")]
+    missing: bool,
 
     /// Write a default config file to ~/.config/distq/config.toml and exit
     #[arg(long)]
@@ -147,6 +157,29 @@ struct Args {
     /// Print version and exit
     #[arg(long = "version", short = 'V')]
     print_version: bool,
+
+    /// Subcommands
+    #[command(subcommand)]
+    subcommand: Option<Cmd>,
+}
+
+#[derive(Subcommand, Debug)]
+enum Cmd {
+    /// Manage Docker-based package sources
+    Docker {
+        #[command(subcommand)]
+        action: DockerCmd,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum DockerCmd {
+    /// Build distq/<distro> images from Dockerfile.<distro> files
+    Build {
+        /// Only build images that don't exist locally yet
+        #[arg(long)]
+        missing: bool,
+    },
 }
 
 #[tokio::main]
@@ -163,6 +196,15 @@ async fn main() -> Result<()> {
     }
 
     let cfg = Config::load().context("failed to load config")?;
+
+    // ── Docker subcommand / flag ───────────────────────────────────────────
+
+    if args.build_docker_images {
+        return docker_build::run(&cfg, args.missing);
+    }
+    if let Some(Cmd::Docker { action: DockerCmd::Build { missing } }) = args.subcommand {
+        return docker_build::run(&cfg, missing);
+    }
     let color = supports_color();
     let jobs = args.jobs.max(1);
 
@@ -219,7 +261,7 @@ async fn main() -> Result<()> {
             Some(s) => s,
             None => bail!(
                 "distq: unknown source '{name}'\n\
-                 Available: arch, aur, fedora, alpine, debian, ubuntu, nixos, repology"
+                 Available: docker, arch, aur, fedora, alpine, debian, ubuntu, nixos, repology"
             ),
         }
     } else {
