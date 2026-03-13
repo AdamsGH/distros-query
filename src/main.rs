@@ -8,7 +8,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use config::{Config, parse_repos};
 use format::{OutputFormat, TableLayout, print_results};
-use sources::{PackageInfo, PackageSource, ordered_sources, source_for};
+use sources::{PackageInfo, PackageSource, ordered_sources};
 use sources::repology;
 use std::io::{self, IsTerminal};
 use std::sync::Arc;

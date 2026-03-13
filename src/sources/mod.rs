@@ -136,14 +136,6 @@ pub fn ordered_sources(cfg: &Config) -> Vec<Box<dyn PackageSource>> {
     result
 }
 
-/// Find the best source for a given repo, in priority order.
-pub fn source_for<'a>(
-    sources: &'a [Box<dyn PackageSource>],
-    repo: &str,
-) -> Option<&'a dyn PackageSource> {
-    sources.iter().find(|s| s.supports(repo)).map(|s| s.as_ref())
-}
-
 /// Build a registry containing only one named source (for --source flag).
 pub fn single_source(name: &str) -> Option<Vec<Box<dyn PackageSource>>> {
     let src: Box<dyn PackageSource> = match name {

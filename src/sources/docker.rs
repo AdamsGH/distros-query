@@ -121,7 +121,7 @@ fn parse(pkg: &str, repo: &str, parser: Parser, output: &str) -> Vec<PackageInfo
 /// Package managers search by substring — prefer exact match, fall back to all results.
 /// This keeps behaviour consistent with native API sources (arch, alpine, etc.)
 /// which return only the exact package.
-fn filter_results(pkg: &str, mut results: Vec<PackageInfo>) -> Vec<PackageInfo> {
+fn filter_results(pkg: &str, results: Vec<PackageInfo>) -> Vec<PackageInfo> {
     let exact: Vec<PackageInfo> = results
         .iter()
         .filter(|r| r.name == pkg)
