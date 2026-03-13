@@ -19,14 +19,12 @@ $ distq --profile linux curl
 └────────────────────────────────────────────────────────────┘
 ```
 
----
-
 ## How it works
 
 distq queries packages from multiple sources in priority order. For each repo it picks the first source that can handle it and returns results:
 
 ```
-docker → arch → aur → fedora → alpine → debian → ubuntu → nixos → repology
+docker -> arch -> aur -> fedora -> alpine -> debian -> ubuntu -> nixos -> repology
 ```
 
 **Native sources** scrape distro APIs/websites directly:
@@ -44,9 +42,7 @@ docker → arch → aur → fedora → alpine → debian → ubuntu → nixos �
 
 **Docker source** runs each distro's own package manager in an isolated minimal image, with the package database pre-cached at build time. This gives you native `pacman`, `apt-cache`, `dnf5`, `zypper`, `xbps-query`, and `apk` without installing them.
 
-If a non-repology source returns empty results, distq falls through to the next matching source before falling back to Repology. This means you always get *something* even if a native source is incomplete.
-
----
+If a non-repology source returns empty results, distq falls through to the next matching source before falling back to Repology.
 
 ## Installation
 
@@ -62,13 +58,9 @@ cargo install --path .
 
 Requires Rust 1.85+ (edition 2024).
 
----
-
 ## Docker images
 
-The docker source uses images tagged `distq/<distro>`. Each image contains the distro's own package manager binary plus a pre-cached package database — no network access is needed at query time.
-
-**Supported images:**
+The docker source uses images tagged `distq/<distro>`. Each image contains the distro's own package manager binary plus a pre-cached package database, so no network access is needed at query time.
 
 | Image | Package manager | Base distro |
 |-------|-----------------|-------------|
@@ -79,8 +71,6 @@ The docker source uses images tagged `distq/<distro>`. Each image contains the d
 | `distq/opensuse` | `zypper` | opensuse/leap:15.5 |
 | `distq/void` | `xbps-query` | voidlinux/voidlinux |
 | `distq/alpine` | `apk` | alpine:3.19 |
-
-### Build images
 
 ```sh
 # Build all images
@@ -97,8 +87,6 @@ just docker-one arch
 ```
 
 Dockerfiles are in the `dockerfiles/` directory. Set `dockerfiles_dir` in config to point distq at them if the binary and dockerfiles are in different locations.
-
----
 
 ## Usage
 
@@ -135,32 +123,24 @@ distq --repos arch,debian curl
 # Force flat layout
 distq --repos arch,debian --layout flat curl
 
-# JSON — includes source field, suitable for piping
+# JSON (includes source field, suitable for piping)
 distq --repos arch,debian --format json curl | jq '.[].name'
 ```
 
 ### Force a specific source backend
 
 ```sh
-# Use only the docker source (bypass native scrapers)
 distq --source docker curl
-
-# Use only repology
 distq --source repology curl
 ```
 
-### Listing mode (no package name)
+### Listing mode
 
-Without a package argument, distq switches to listing/browsing mode via Repology:
+Without a package argument distq switches to listing/browsing mode via Repology:
 
 ```sh
-# List packages in a repo
 distq --repo arch
-
-# Pagination
 distq --repo arch --page 3
-
-# Filters (Repology listing only)
 distq --repo arch --newest
 distq --repo arch --outdated
 distq --repo arch --maintainer user@example.com
@@ -174,49 +154,33 @@ distq --repo debian --search "python"
 | `DISTQ_REPOS` | Override default repo list (comma-separated) |
 | `NO_COLOR` | Disable colour output |
 
----
-
 ## Configuration
-
-Generate a default config:
 
 ```sh
 distq --init-config
 ```
 
-This writes `~/.config/distq/config.toml`:
+Writes `~/.config/distq/config.toml`:
 
 ```toml
-default_repos = []        # repos used when no --repo/--repos/--profile given
-                          # leave empty to use autodetect
+default_repos = []        # leave empty to autodetect from current distro
 
 [profiles]
 linux = ["arch", "aur", "debian", "ubuntu", "fedora", "alpine", "nixos", "void", "opensuse"]
 bsd   = ["freebsd", "openbsd", "netbsd"]
 
 [sources]
-# Override source priority (default shown below)
 priority = ["docker", "arch", "aur", "fedora", "alpine", "debian", "ubuntu", "nixos", "repology"]
 
 [docker]
-# Path to directory containing Dockerfile.* files
-# Default search order: next to binary → ~/.config/distq/dockerfiles/ → this setting
 # dockerfiles_dir = "/path/to/dockerfiles"
 ```
 
-### Source priority
-
-The `priority` list controls which source is tried first for each repo. The first source whose `supports(repo)` returns `true` and returns non-empty results wins. `repology` is always appended as a last-resort fallback even if not listed.
-
-The `docker` source is first by default — it activates automatically for any repo that has a corresponding `distq/<distro>` image present locally.
-
----
+The `priority` list controls which source is tried first for each repo. The first source that matches and returns non-empty results wins. `repology` is always appended as a last-resort fallback even if not listed.
 
 ## Output details
 
 ### Transposed table (default for multi-repo)
-
-Each row is a repo. Columns are queried package names. Version is shown inline.
 
 ```
 ┌──────────────────────────────────┐
@@ -229,8 +193,6 @@ Each row is a repo. Columns are queried package names. Version is shown inline.
 
 ### Flat table (default for single-repo, or `--layout flat`)
 
-Each row is a result entry.
-
 ```
 ┌─────────────────────────────────────────┐
 │ REPO   PACKAGE   VERSION   STATUS       │
@@ -240,7 +202,7 @@ Each row is a result entry.
 └─────────────────────────────────────────┘
 ```
 
-### JSON output
+### JSON
 
 ```json
 [
@@ -256,28 +218,17 @@ Each row is a result entry.
 ]
 ```
 
----
-
 ## Development
 
 ```sh
-# Build and run
-just run curl
-
-# Smoke test (linux profile)
-just smoke
-
-# Run tests
+just run curl        # build debug and run
+just smoke           # search 'curl' across the linux profile
 just test
-
-# Lint
 just lint
-
-# Package release binary + dockerfiles
-just package
+just package         # build release + pack into dist/
+just tag-release     # tag from Cargo.toml version and push
+just tag-release 0.2.0  # bump Cargo.toml, tag, push
 ```
-
----
 
 ## Architecture
 
@@ -288,7 +239,7 @@ src/
   format.rs        Table and JSON rendering (comfy-table)
   config.rs        Config file (TOML), profile resolution, docker config
   autodetect.rs    Detect current distro from /etc/os-release + ID_LIKE fallback
-  docker_build.rs  `distq docker build/list` implementation
+  docker_build.rs  distq docker build/list implementation
   sources/
     mod.rs         PackageSource trait, registry, DEFAULT_PRIORITY
     arch.rs        pkgs.archlinux.org
@@ -300,23 +251,17 @@ src/
     docker.rs      docker run distq/<distro>, per-distro output parsers
     repology.rs    repology.org API, pagination, retry on 429
 dockerfiles/
-  Dockerfile.arch
-  Dockerfile.debian
-  Dockerfile.ubuntu
-  Dockerfile.fedora
-  Dockerfile.opensuse
-  Dockerfile.void
-  Dockerfile.alpine
+  Dockerfile.{arch,debian,ubuntu,fedora,opensuse,void,alpine}
 ```
 
 ### Adding a new source
 
-1. Create `src/sources/<name>.rs` implementing the `PackageSource` trait
+1. Create `src/sources/<name>.rs` implementing `PackageSource`
 2. Register it in `src/sources/mod.rs` (`ordered_sources`, `single_source`, `DEFAULT_PRIORITY`)
 3. Add `pub mod <name>;` to `mod.rs`
 
 ### Adding a new docker image
 
-1. Write `dockerfiles/Dockerfile.<distro>` — the image should accept a search term as `ENTRYPOINT` argument and print one package per line (or any format, then add a parser in `docker.rs`)
-2. Add a parser variant in `src/sources/docker.rs` (`parser_for`, `ParseMode`)
-3. Map the repo name → image in `DockerSource::supports()` and `search()`
+1. Write `dockerfiles/Dockerfile.<distro>` -- the image ENTRYPOINT should accept a search term and print results to stdout
+2. Add a parser in `src/sources/docker.rs` (`parser_for`, `ParseMode`)
+3. Map the repo name to the image in `DockerSource::supports()` and `search()`

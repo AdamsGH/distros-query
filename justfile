@@ -117,6 +117,19 @@ tag-release version="":
     git push origin HEAD "$tag"
     echo "Tagged and pushed ${tag}"
 
+# Force-push an existing tag (re-triggers the release workflow)
+retag version="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -n "{{version}}" ]; then
+        tag="v{{version}}"
+    else
+        tag="v$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')"
+    fi
+    git tag -f -a "$tag" -m "Release ${tag}"
+    git push --force origin "$tag"
+    echo "Re-pushed ${tag}"
+
 # Clean build artifacts
 clean:
     cargo clean
