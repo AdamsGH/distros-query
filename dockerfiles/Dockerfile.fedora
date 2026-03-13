@@ -1,0 +1,139 @@
+# syntax=docker/dockerfile:1
+# Fedora 42 — dnf5 is a C++ binary (no Python dependency).
+# Strategy: copy dnf5 binary + all .so deps + cached repo metadata.
+
+FROM fedora:42 AS extract
+
+RUN dnf5 --version && ldd /usr/bin/dnf5 | head -5
+
+RUN mkdir -p /out/usr/bin \
+             /out/usr/lib64 \
+             /out/etc/yum.repos.d \
+             /out/etc/dnf \
+             /out/var/cache/libdnf5 \
+             /out/var/lib/dnf5 \
+             /out/var/lib/rpm \
+             /out/var/log \
+             /out/etc/pki/tls/certs \
+             /out/etc/ssl/certs \
+             /out/tmp
+
+RUN cp /usr/bin/dnf5 /out/usr/bin/dnf5
+
+# Direct .so dependencies of dnf5
+RUN ldd /usr/bin/dnf5 \
+    | awk '/=>/ { print $3 }' \
+    | grep -v '^$' \
+    | xargs -I{} cp -L {} /out/usr/lib64/ 2>/dev/null || true
+
+# dnf5 ecosystem .so libs
+RUN for pattern in \
+      'libdnf5*.so*' 'libdnf-cli*.so*' \
+      'libsolv*.so*' 'librepo*.so*' 'librhsm*.so*' \
+      'libmodulemd*.so*' 'librpm*.so*' 'libcomps*.so*' \
+      'libgpgme*.so*' 'libgpg-error*.so*' 'libassuan*.so*' \
+      'libgio-2*.so*' 'libglib-2*.so*' 'libgobject-2*.so*' 'libgmodule-2*.so*' \
+      'libffi*.so*' 'libpcre2*.so*' \
+      'libcurl*.so*' 'libnghttp2*.so*' 'libssh*.so*' 'libbrotli*.so*' \
+      'libssl*.so*' 'libcrypto*.so*' \
+      'libsqlite3*.so*' \
+      'liblzma*.so*' 'libzstd*.so*' 'libbz2*.so*' \
+      'libelf*.so*' 'libdw*.so*' \
+      'libcap*.so*' 'libacl*.so*' \
+      'liblua*.so*' 'libpopt*.so*' \
+      'libmagic*.so*' 'libxml2*.so*' \
+      'libjson-c*.so*' 'libyaml*.so*' \
+      'libgcc_s*.so*' 'libstdc++*.so*' \
+      'libz.so*' 'libselinux*.so*' 'libsepol*.so*' \
+      'libmount*.so*' 'libblkid*.so*' 'libuuid*.so*' \
+      'libsystemd*.so*' 'libpsl*.so*' 'libgssapi_krb5*.so*' \
+      'libkrb5*.so*' 'libk5crypto*.so*' 'libkeyutils*.so*' \
+      'libcom_err*.so*' 'libresolv*.so*' \
+      'libgnutls*.so*' 'libhogweed*.so*' 'libnettle*.so*' 'libgmp*.so*' \
+      'libtasn1*.so*' 'libp11-kit*.so*' \
+      'libidn2*.so*' 'libunistring*.so*' \
+      'libldap*.so*' 'liblber*.so*' 'libsasl2*.so*'; do \
+      find /usr/lib64 /lib64 -maxdepth 1 -name "$pattern" 2>/dev/null \
+        | xargs -I{} cp -L {} /out/usr/lib64/ 2>/dev/null || true; \
+    done
+
+# Resolve remaining transitive deps — 3 passes
+RUN for _pass in 1 2 3; do \
+      find /out/usr/lib64 -name '*.so*' -type f 2>/dev/null | while read so; do \
+        ldd "$so" 2>/dev/null \
+          | awk '/=>/ && !/not found/ { print $3 }' \
+          | grep -v '^$' \
+          | while read dep; do \
+              base=$(basename "$dep"); \
+              [ -f "/out/usr/lib64/$base" ] \
+                || cp -L "$dep" /out/usr/lib64/ 2>/dev/null || true; \
+            done; \
+      done; \
+    done
+
+# ELF interpreter — /lib64 is a symlink to /lib in busybox, so copy into /lib
+RUN mkdir -p /out/lib \
+ && ldd /usr/bin/dnf5 \
+    | grep 'ld-linux\|ld\.so' \
+    | awk '{ print $1 }' \
+    | xargs -I{} cp -L {} /out/lib/ 2>/dev/null || true
+
+# Fedora glibc — replaces busybox:glibc's incompatible version
+RUN for lib in libc.so.6 libpthread.so.0 libdl.so.2 libm.so.6 \
+               libresolv.so.2 librt.so.1; do \
+      [ -f "/lib64/$lib" ] && cp -L /lib64/$lib /out/usr/lib64/ 2>/dev/null || true; \
+    done
+
+# rpm db init + metadata required by librpm
+RUN rpm --root /out --initdb 2>/dev/null || true
+RUN mkdir -p /out/usr/lib/rpm \
+ && cp /usr/lib/rpm/rpmrc         /out/usr/lib/rpm/ 2>/dev/null || true \
+ && cp /usr/lib/rpm/macros        /out/usr/lib/rpm/ 2>/dev/null || true \
+ && cp -r /usr/lib/rpm/platform   /out/usr/lib/rpm/ 2>/dev/null || true
+
+RUN cat > /out/etc/yum.repos.d/fedora.repo << 'REPO'
+[fedora]
+name=Fedora 42
+metalink=https://mirrors.fedoraproject.org/metalink?repo=fedora-42&arch=x86_64
+enabled=1
+gpgcheck=0
+skip_if_unavailable=1
+REPO
+
+RUN cat > /out/etc/dnf/dnf.conf << 'CONF'
+[main]
+gpgcheck=0
+best=False
+skip_if_unavailable=True
+CONF
+
+RUN cp /etc/pki/tls/certs/ca-bundle.crt /out/etc/pki/tls/certs/ca-bundle.crt \
+ && cp /etc/pki/tls/certs/ca-bundle.crt /out/etc/ssl/certs/ca-certificates.crt
+
+# libdnf5 plugins
+RUN mkdir -p /out/usr/lib64/libdnf5/plugins \
+ && cp -r /usr/lib64/libdnf5/plugins/. /out/usr/lib64/libdnf5/plugins/ 2>/dev/null || true
+
+# Pre-cache repo metadata — symlink so the cache path hash matches runtime
+RUN mv /var/cache/libdnf5 /var/cache/libdnf5.bak 2>/dev/null || true \
+ && ln -sf /out/var/cache/libdnf5 /var/cache/libdnf5 \
+ && cp /out/etc/yum.repos.d/fedora.repo /etc/yum.repos.d/fedora.repo \
+ && cp /out/etc/dnf/dnf.conf /etc/dnf/dnf.conf \
+ && dnf5 --releasever=42 makecache \
+ && rm -f /var/cache/libdnf5 \
+ && mv /var/cache/libdnf5.bak /var/cache/libdnf5 2>/dev/null || true \
+ && echo "=== cache ===" && du -sh /out/var/cache/libdnf5/
+
+FROM busybox:glibc
+
+# Remove busybox:glibc's own glibc — Fedora's is ABI-incompatible with it
+RUN rm -f /lib/libc.so.6 /lib/libpthread.so.0 /lib/libdl.so.2 \
+          /lib/libm.so.6 /lib/libresolv.so.2 /lib/librt.so.1 \
+          /lib/ld-linux-x86-64.so.2
+
+COPY --from=extract /out/ /
+
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+ENV LD_LIBRARY_PATH=/usr/lib64
+
+ENTRYPOINT ["/usr/bin/dnf5", "-C", "--releasever=42", "search"]

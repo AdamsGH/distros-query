@@ -1,0 +1,51 @@
+# syntax=docker/dockerfile:1
+FROM voidlinux/voidlinux:latest AS extract
+
+RUN echo 'repository=https://repo-default.voidlinux.org/current' \
+    > /etc/xbps.d/00-repository-main.conf
+
+RUN xbps-install -Sy
+RUN xbps-install -yu xbps; xbps-install -Sy; xbps-install -yu xbps; xbps-install -Sy || true
+
+RUN find /usr/bin -name 'xbps-query*' | sort && ldd /usr/bin/xbps-query 2>&1 || true
+
+RUN mkdir -p /out/usr/bin \
+             /out/usr/lib \
+             /out/lib64 \
+             /out/var/db/xbps \
+             /out/etc/xbps.d \
+             /out/etc/ssl/certs
+
+RUN cp /usr/bin/xbps-query /out/usr/bin/xbps-query
+
+# xbps-query links against glibc — copy every versioned .so with its soname.
+# ldd is unreliable on Void; enumerate deps explicitly.
+RUN find /usr/lib /lib \( -name "libxbps.so*" -o -name "libssl.so*" \
+      -o -name "libcrypto.so*" -o -name "libarchive.so*" -o -name "liblzma.so*" \
+      -o -name "libbz2.so*"    -o -name "libzstd.so*"   -o -name "libz.so*" \
+      -o -name "libacl.so*"    -o -name "libattr.so*"   -o -name "liblz4.so*" \
+      -o -name "libnettle.so*" -o -name "libhogweed.so*" -o -name "libgmp.so*" \
+      -o -name "libc.so*"      -o -name "libpthread.so*" -o -name "libdl.so*" \
+      -o -name "libm.so*"      -o -name "libresolv.so*" \) \
+    -not -type d 2>/dev/null \
+    | xargs -I{} sh -c 'cp -L "{}" "/out/usr/lib/$(basename {})" 2>/dev/null || true'
+
+# ELF interpreter is hardcoded to /lib64/ld-linux-x86-64.so.2
+RUN cp -L /usr/lib/ld-linux-x86-64.so.2 /out/lib64/
+
+RUN echo 'repository=https://repo-default.voidlinux.org/current' \
+    > /out/etc/xbps.d/00-repository-main.conf
+
+RUN xbps-install -S 2>/dev/null || true
+RUN cp -r /var/db/xbps/. /out/var/db/xbps/ 2>/dev/null || true
+
+RUN cp /etc/ssl/certs/ca-certificates.crt /out/etc/ssl/certs/ 2>/dev/null || true
+
+FROM scratch
+
+COPY --from=extract /out/ /
+
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+ENV LD_LIBRARY_PATH=/usr/lib
+
+ENTRYPOINT ["/usr/bin/xbps-query", "-Rs"]

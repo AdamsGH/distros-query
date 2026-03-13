@@ -1,0 +1,173 @@
+# syntax=docker/dockerfile:1
+FROM opensuse/leap:15.5 AS extract
+
+RUN zypper -q refresh 2>/dev/null
+
+RUN mkdir -p /out/usr/bin \
+             /out/zypper-libs \
+             /out/etc/zypp \
+             /out/etc/zypp/repos.d \
+             /out/var/cache/zypp \
+             /out/var/lib/zypp \
+             /out/etc/ssl/certs \
+             /out/tmp
+
+RUN cp /usr/bin/zypper /out/usr/bin/zypper \
+ && cp /usr/bin/rpm    /out/usr/bin/rpm    2>/dev/null || true \
+ && cp /usr/bin/rpmdb2solv /out/usr/bin/rpmdb2solv 2>/dev/null \
+ || cp $(which rpmdb2solv) /out/usr/bin/rpmdb2solv 2>/dev/null || true
+
+# Bundle all .so deps into /zypper-libs — isolated from busybox:glibc's system libs
+RUN for bin in /usr/bin/zypper /usr/bin/rpmdb2solv $(which rpmdb2solv 2>/dev/null); do \
+      [ -f "$bin" ] || continue; \
+      ldd "$bin" 2>/dev/null \
+        | awk '/=>/ { print $3 }' \
+        | grep -v '^$' \
+        | xargs -I{} cp -L {} /out/zypper-libs/ 2>/dev/null || true; \
+    done
+
+# libzypp, libsolv, librpm and their transitive deps
+RUN for lib in /usr/lib64/libzypp*.so* /usr/lib64/libsolv*.so* /usr/lib64/librpm*.so*; do \
+      [ -f "$lib" ] || continue; \
+      cp -L "$lib" /out/zypper-libs/ 2>/dev/null || true; \
+      ldd "$lib" 2>/dev/null \
+        | awk '/=>/ { print $3 }' \
+        | grep -v '^$' \
+        | xargs -I{} cp -L {} /out/zypper-libs/ 2>/dev/null || true; \
+    done
+
+# librpm dlopen-s several backends (BDB/sqlite/ndb) and crypto helpers — copy explicitly
+RUN for lib in /usr/lib64/libdb*.so* \
+               /usr/lib64/libsqlite3*.so* \
+               /usr/lib64/libnss*.so* \
+               /usr/lib64/libnspr*.so* \
+               /usr/lib64/libgcrypt*.so* \
+               /usr/lib64/libgpg-error*.so* \
+               /usr/lib64/liblzma*.so* \
+               /usr/lib64/libzstd*.so* \
+               /usr/lib64/libbz2*.so* \
+               /usr/lib64/libelf*.so* \
+               /usr/lib64/libdw*.so* \
+               /usr/lib64/libcap*.so* \
+               /usr/lib64/libacl*.so* \
+               /usr/lib64/liblua*.so* \
+               /usr/lib64/libpopt*.so* \
+               /usr/lib64/libmagic*.so* \
+               /usr/lib64/libgio*.so* \
+               /usr/lib64/libglib*.so* \
+               /usr/lib64/libgobject*.so* \
+               /usr/lib64/libcurl*.so* \
+               /usr/lib64/libnghttp2*.so* \
+               /usr/lib64/libssh*.so* \
+               /usr/lib64/libssl*.so* \
+               /usr/lib64/libcrypto*.so* \
+               /usr/lib64/libldap*.so* \
+               /usr/lib64/liblber*.so* \
+               /usr/lib64/libsasl2*.so* \
+               /usr/lib64/libidn2*.so* \
+               /usr/lib64/libunistring*.so* \
+               /usr/lib64/libffi*.so*; do \
+      [ -f "$lib" ] || continue; \
+      cp -L "$lib" /out/zypper-libs/ 2>/dev/null || true; \
+    done
+
+# Resolve remaining transitive deps — 3 passes over what's already in zypper-libs
+RUN for _pass in 1 2 3; do \
+      find /out/zypper-libs -name '*.so*' -type f 2>/dev/null | while read so; do \
+        ldd "$so" 2>/dev/null \
+          | awk '/=>/ && !/not found/ { print $3 }' \
+          | grep -v '^$' \
+          | while read dep; do \
+              base=$(basename "$dep"); \
+              [ -f "/out/zypper-libs/$base" ] || cp -L "$dep" /out/zypper-libs/ 2>/dev/null || true; \
+            done; \
+      done; \
+    done
+
+# ELF interpreter goes into zypper-libs so the wrapper can reference it by path
+RUN ldd /usr/bin/zypper \
+    | grep 'ld-linux\|ld\.so' \
+    | awk '{ print $1 }' \
+    | xargs -I{} cp {} /out/zypper-libs/
+
+# openSUSE's own glibc — overrides whatever busybox:glibc has
+RUN cp -L /lib64/libpthread.so.0  /out/zypper-libs/ 2>/dev/null || true
+RUN cp -L /lib64/libc.so.6        /out/zypper-libs/ 2>/dev/null || true
+RUN cp -L /lib64/libdl.so.2       /out/zypper-libs/ 2>/dev/null || true
+RUN cp -L /lib64/libm.so.6        /out/zypper-libs/ 2>/dev/null || true
+RUN cp -L /lib64/libresolv.so.2   /out/zypper-libs/ 2>/dev/null || true
+RUN cp -L /lib64/librt.so.1       /out/zypper-libs/ 2>/dev/null || true
+
+RUN cat > /out/etc/zypp/zypp.conf << 'CONF'
+[main]
+solver.onlyRequires = true
+CONF
+
+RUN cat > /out/etc/zypp/repos.d/repo-oss.repo << 'REPO'
+[repo-oss]
+name=openSUSE-Leap-15.5-Oss
+enabled=1
+autorefresh=0
+baseurl=https://download.opensuse.org/distribution/leap/15.5/repo/oss/
+type=rpm-md
+gpgcheck=0
+REPO
+
+RUN cp -r /var/cache/zypp/. /out/var/cache/zypp/ 2>/dev/null; true
+RUN cp -r /var/lib/zypp/.   /out/var/lib/zypp/  2>/dev/null; true
+
+# Pre-create @System solv dir — zypper target init writes its rpm db cache here
+RUN mkdir -p /out/var/cache/zypp/solv/@System
+
+# initialise an empty rpm db into the output tree
+RUN mkdir -p /out/var/lib/rpm \
+ && rpm --root /out --initdb
+
+# rpm metadata required by librpm at runtime
+RUN mkdir -p /out/usr/lib/rpm \
+ && cp /usr/lib/rpm/rpmrc         /out/usr/lib/rpm/ 2>/dev/null || true \
+ && cp /usr/lib/rpm/macros        /out/usr/lib/rpm/ 2>/dev/null || true \
+ && cp -r /usr/lib/rpm/platform   /out/usr/lib/rpm/ 2>/dev/null || true \
+ && cp -r /usr/lib/rpm/fileattrs  /out/usr/lib/rpm/ 2>/dev/null || true
+
+# Run native zypper --root to build @System solv + download/cache repo metadata.
+# Uses the host's librpm/libzypp so both actually work.
+# In the final stage the pre-built caches allow zypper to run without network.
+RUN mkdir -p /out/var/cache/zypp/raw \
+             /out/var/cache/zypp/solv \
+             /out/var/lib/zypp \
+             /out/tmp \
+ && zypper --root /out \
+           --reposd-dir /out/etc/zypp/repos.d \
+           --cache-dir  /out/var/cache/zypp \
+           --no-gpg-checks \
+           refresh 2>&1 || true
+
+RUN cp /var/lib/ca-certificates/ca-bundle.pem /out/etc/ssl/certs/ca-certificates.crt 2>/dev/null \
+ || cp /etc/ssl/ca-bundle.pem /out/etc/ssl/certs/ca-certificates.crt 2>/dev/null || true
+
+FROM busybox:glibc
+
+COPY --from=extract /out/ /
+
+# Wrap zypper, rpm, and rpmdb2solv to use openSUSE's own linker.
+# libzypp calls rpmdb2solv via fork+exec — without a wrapper the child
+# inherits busybox:glibc's ABI which is incompatible (exit 129).
+RUN mkdir -p /usr/local/bin \
+ && mv /usr/bin/rpmdb2solv /usr/bin/rpmdb2solv.real 2>/dev/null || true \
+ && printf '#!/bin/sh\nexec /zypper-libs/ld-linux-x86-64.so.2 --library-path /zypper-libs /usr/bin/zypper "$@"\n' \
+    > /usr/local/bin/zypper-run \
+ && chmod +x /usr/local/bin/zypper-run \
+ && printf '#!/bin/sh\nexec /zypper-libs/ld-linux-x86-64.so.2 --library-path /zypper-libs /usr/bin/rpm "$@"\n' \
+    > /usr/local/bin/rpm-run \
+ && chmod +x /usr/local/bin/rpm-run \
+ && printf '#!/bin/sh\nexec /zypper-libs/ld-linux-x86-64.so.2 --library-path /zypper-libs /usr/bin/rpmdb2solv.real "$@"\n' \
+    > /usr/bin/rpmdb2solv \
+ && chmod +x /usr/bin/rpmdb2solv
+
+RUN /usr/local/bin/rpm-run --initdb 2>/dev/null || true
+RUN /usr/local/bin/zypper-run -q refresh 2>/dev/null || true
+
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+
+ENTRYPOINT ["/usr/local/bin/zypper-run", "-q", "search"]

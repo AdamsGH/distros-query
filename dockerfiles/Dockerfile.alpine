@@ -1,0 +1,40 @@
+# syntax=docker/dockerfile:1
+FROM alpine:3.19 AS extract
+
+RUN apk add --no-cache ca-certificates
+
+RUN apk update
+
+RUN mkdir -p /out/sbin \
+             /out/etc/apk \
+             /out/etc/ssl/certs \
+             /out/lib/apk/db \
+             /out/lib \
+             /out/tmp \
+             /out/var/cache/apk \
+    && cp /sbin/apk                              /out/sbin/apk \
+    && cp /etc/apk/repositories                  /out/etc/apk/repositories \
+    && cp /etc/ssl/certs/ca-certificates.crt     /out/etc/ssl/certs/ca-certificates.crt
+
+RUN cp -r /lib/apk/db/. /out/lib/apk/db/
+
+RUN cp /var/cache/apk/* /out/var/cache/apk/ 2>/dev/null || true
+
+# apk resolves cached APKINDEX through the /etc/apk/cache symlink
+RUN ln -s /var/cache/apk /out/etc/apk/cache
+
+RUN cp /etc/apk/arch /out/etc/apk/arch 2>/dev/null || true
+
+RUN mkdir -p /out/etc/apk/keys \
+ && cp -r /etc/apk/keys/. /out/etc/apk/keys/ 2>/dev/null || true
+
+RUN ldd /sbin/apk \
+    | awk '/=>/ { print $3 }' \
+    | grep -v '^$' \
+    | xargs -I{} cp -L {} /out/lib/ 2>/dev/null || true
+RUN cp /lib/ld-musl-*.so.1 /out/lib/ 2>/dev/null || true
+
+FROM scratch
+COPY --from=extract /out/ /
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+ENTRYPOINT ["/sbin/apk", "--cache-dir", "/var/cache/apk", "--no-network", "search", "-q"]

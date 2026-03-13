@@ -1,0 +1,57 @@
+# syntax=docker/dockerfile:1
+FROM debian:bookworm-slim AS extract
+
+RUN apt-get update -qq 2>/dev/null \
+ && apt-get install -y --no-install-recommends ca-certificates 2>/dev/null
+
+RUN ldd /usr/bin/apt-cache
+
+RUN mkdir -p /out/usr/bin \
+             /out/usr/lib/x86_64-linux-gnu \
+             /out/lib/x86_64-linux-gnu \
+             /out/etc/apt/apt.conf.d \
+             /out/etc/apt/sources.list.d \
+             /out/var/cache/apt \
+             /out/var/lib/apt/lists \
+             /out/var/lib/dpkg \
+             /out/usr/share/dpkg \
+             /out/etc/ssl/certs \
+             /out/tmp
+
+RUN cp /usr/bin/apt-cache /out/usr/bin/apt-cache
+
+RUN ldd /usr/bin/apt-cache \
+    | awk '/=>/ { print $3 }' \
+    | grep -v '^$' \
+    | xargs -I{} sh -c 'cp {} /out/$(echo {} | sed "s|^/||g" | xargs -I_ dirname _)/ 2>/dev/null || cp {} /out/usr/lib/x86_64-linux-gnu/'
+
+RUN ldd /usr/bin/apt-cache \
+    | grep -E 'ld-linux|ld\.so' \
+    | awk '{ print $1 }' \
+    | xargs -I{} cp {} /out/lib/ 2>/dev/null || true
+
+RUN echo 'Dir "/";' > /out/etc/apt/apt.conf.d/00dir
+
+RUN cp -r /var/lib/apt/lists/. /out/var/lib/apt/lists/
+RUN cp /var/lib/dpkg/status /out/var/lib/dpkg/status
+
+RUN apt-cache gencaches 2>/dev/null || true \
+ && cp /var/cache/apt/pkgcache.bin    /out/var/cache/apt/pkgcache.bin    2>/dev/null || true \
+ && cp /var/cache/apt/srcpkgcache.bin /out/var/cache/apt/srcpkgcache.bin 2>/dev/null || true
+
+RUN cp /etc/apt/sources.list.d/debian.sources /out/etc/apt/sources.list.d/debian.sources 2>/dev/null \
+ || cp /etc/apt/sources.list /out/etc/apt/sources.list 2>/dev/null || true
+
+# apt-pkg/init.cc reads these two files on startup — required to avoid "Error reading the CPU table"
+RUN cp /usr/share/dpkg/cputable   /out/usr/share/dpkg/cputable \
+ && cp /usr/share/dpkg/tupletable /out/usr/share/dpkg/tupletable
+
+RUN cp /etc/ssl/certs/ca-certificates.crt /out/etc/ssl/certs/ca-certificates.crt
+
+FROM busybox:glibc
+
+COPY --from=extract /out/ /
+
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+
+ENTRYPOINT ["/usr/bin/apt-cache", "search", "--names-only"]

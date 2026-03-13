@@ -1,0 +1,57 @@
+# syntax=docker/dockerfile:1
+FROM archlinux:base AS extract
+
+RUN pacman -Sy --noconfirm
+
+RUN ldd /usr/bin/pacman
+
+RUN mkdir -p /out/usr/bin \
+             /out/usr/lib \
+             /out/etc/pacman.d \
+             /out/var/lib/pacman/sync \
+             /out/var/lib/pacman/local \
+             /out/etc
+
+RUN cp /usr/bin/pacman /out/usr/bin/pacman
+
+RUN cat > /out/etc/pacman.conf << 'CONF'
+[options]
+HoldPkg     = pacman glibc
+Architecture = auto
+SigLevel = Never
+LocalFileSigLevel = Optional
+
+[core]
+Include = /etc/pacman.d/mirrorlist
+
+[extra]
+Include = /etc/pacman.d/mirrorlist
+CONF
+
+RUN echo 'Server = https://geo.mirror.pkgbuild.com/$repo/os/$arch' \
+    > /out/etc/pacman.d/mirrorlist
+
+RUN ldd /usr/bin/pacman \
+    | awk '/=>/ { print $3 }' \
+    | grep -v '^$' \
+    | xargs -I{} cp {} /out/usr/lib/
+
+RUN ldd /usr/bin/pacman \
+    | grep 'ld-linux' \
+    | awk '{ print $1 }' \
+    | xargs -I{} cp {} /out/usr/lib/
+
+RUN cp /etc/ssl/certs/ca-certificates.crt /out/etc/ca-certificates.crt
+
+RUN pacman -Sy --noconfirm --noprogressbar \
+    && cp -r /var/lib/pacman/sync/. /out/var/lib/pacman/sync/
+
+FROM busybox:glibc
+
+COPY --from=extract /out/ /
+
+RUN ln -sf /usr/lib/ld-linux-x86-64.so.2 /lib/ld-linux-x86-64.so.2 2>/dev/null || true
+
+ENV SSL_CERT_FILE=/etc/ca-certificates.crt
+
+ENTRYPOINT ["/usr/bin/pacman", "-Ss"]
