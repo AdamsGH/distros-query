@@ -84,6 +84,39 @@ package:
         -C ../../ dockerfiles
     @echo "Created dist/distq-x86_64-unknown-linux-gnu.tar.gz"
 
+# Tag and push a release.
+# Version defaults to the one in Cargo.toml; pass an explicit version to override.
+#   just tag-release          → uses Cargo.toml version
+#   just tag-release 0.2.0   → bumps Cargo.toml, then tags
+tag-release version="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    cargo_ver=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+
+    if [ -n "{{version}}" ]; then
+        new_ver="{{version}}"
+        if [ "$new_ver" != "$cargo_ver" ]; then
+            sed -i "s/^version = \"${cargo_ver}\"/version = \"${new_ver}\"/" Cargo.toml
+            cargo generate-lockfile 2>/dev/null || true
+            git add Cargo.toml Cargo.lock
+            git commit -m "chore: bump version to ${new_ver}"
+        fi
+    else
+        new_ver="$cargo_ver"
+    fi
+
+    tag="v${new_ver}"
+
+    if git rev-parse "$tag" >/dev/null 2>&1; then
+        echo "Tag $tag already exists." >&2
+        exit 1
+    fi
+
+    git tag -a "$tag" -m "Release ${tag}"
+    git push origin HEAD "$tag"
+    echo "Tagged and pushed ${tag}"
+
 # Clean build artifacts
 clean:
     cargo clean
