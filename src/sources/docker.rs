@@ -190,16 +190,25 @@ fn parse_pacman(pkg: &str, repo: &str, output: &str) -> Vec<PackageInfo> {
     results
 }
 
-// microdnf/dnf search → "name.arch : description"
-// May include header lines like "============" — skip those.
+// dnf search output (Fedora 40+):
+//   Header lines: "Updating and loading repositories:", "Matched fields: ...", separator lines
+//   Data lines:   "name.arch\tSummary"  (tab-separated, no version)
 fn parse_dnf(pkg: &str, repo: &str, output: &str) -> Vec<PackageInfo> {
     output
         .lines()
         .filter_map(|l| {
             let l = l.trim();
-            if l.starts_with('=') || l.is_empty() { return None; }
-            // "curl.x86_64 : ..." or "curl : ..."
-            let name_arch = l.split(" : ").next()?.trim();
+            if l.is_empty()
+                || l.starts_with('=')
+                || l.starts_with("Updating")
+                || l.starts_with("Repositories")
+                || l.starts_with("Matched")
+                || l.starts_with("Last")
+            {
+                return None;
+            }
+            // Data line: "curl.x86_64\tSummary" — split on first tab
+            let name_arch = l.split('\t').next()?.trim();
             // Strip .arch suffix
             let name = name_arch.split('.').next()?.trim().to_string();
             if name.is_empty() { return None; }
@@ -208,32 +217,28 @@ fn parse_dnf(pkg: &str, repo: &str, output: &str) -> Vec<PackageInfo> {
         .collect()
 }
 
-// zypper -q search → table rows: "| i | name | version | arch | repo | summary |"
-// or compact:        "| name | summary |"
+// zypper search output (openSUSE Leap 15.5):
+//   "S  | Name   | Summary   | Type"
+//   "---+--------+-----------+--------"
+//   "   | curl   | A Tool... | package"
+// No version in search output — zypper info <pkg> would be needed for that.
 fn parse_zypper(pkg: &str, repo: &str, output: &str) -> Vec<PackageInfo> {
     output
         .lines()
         .filter_map(|l| {
             let l = l.trim();
-            if !l.starts_with('|') { return None; }
-            // Split on '|', collect non-empty trimmed fields
+            // Skip separator lines and lines not containing '|'
+            if !l.contains('|') || l.starts_with('-') { return None; }
             let fields: Vec<&str> = l.split('|')
                 .map(|f| f.trim())
-                .filter(|f| !f.is_empty())
                 .collect();
-            // Header rows contain "Name", "S", etc. — skip
-            if fields.iter().any(|f| *f == "Name" || *f == "S") { return None; }
-            // First meaningful field is the package name
-            let name = fields.first()?.trim().to_string();
+            // Need at least: S, Name, Summary — i.e. 3+ fields
+            if fields.len() < 3 { return None; }
+            // Header row
+            if fields[1] == "Name" || fields[1] == "S" { return None; }
+            let name = fields[1].to_string();
             if name.is_empty() { return None; }
-            // Version is the third field in the full table (S, Name, Version...)
-            // but may not be present in compact mode — use "-" as fallback
-            let version = if fields.len() >= 3 {
-                fields[2].to_string()
-            } else {
-                "-".to_string()
-            };
-            Some(make(pkg, repo, name, version))
+            Some(make(pkg, repo, name, "-".to_string()))
         })
         .collect()
 }
